@@ -1,60 +1,141 @@
 // SPDX-License-Identifier: Apache-2.0
 //! SigmaOS-panels — SigmaOS panels component inspired by Linux Mint / Omarchy / Arch Linux.
 //!
-//! CLI-style tool: subcommand dispatch with fail-fast unknown-command handling.
+//! Omarchy/Hyprland-style shell config: monitors, keybinds, exec-once; fail-fast validation, deterministic render.
 //! Principles: single responsibility, fail-fast, defensive programming,
 //! component isolation, stable API, deterministic tests.
 
 use std::fmt;
-/// Errors for `ToolError` operations. Fail-fast: invalid input is rejected.
+use std::collections::BTreeMap;
+
+/// Errors for `DesktopError` operations. Fail-fast: invalid input is rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolError {
-    /// Tool name must not be empty
-    EmptyName,
-    /// Unrecognized subcommand
-    UnknownCommand(String),
-    /// Subcommand requires arguments
-    MissingArgs(String),
+pub enum DesktopError {
+    /// Monitor spec must be `NAME,WxH@R,x,y,scale`
+    BadMonitor(String),
+    /// Keybind requires non-empty mods, key, dispatcher, and arg
+    BadBind(String),
+    /// Identical keybind already configured
+    DuplicateBind(String),
+    /// exec-once command must not be empty
+    EmptyExec,
+    /// General key must not be empty
+    EmptyGeneral,
 }
 
-impl fmt::Display for ToolError {
+impl fmt::Display for DesktopError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyName => write!(f, "tool name must not be empty"),
-            Self::UnknownCommand(x) => write!(f, "unrecognized subcommand: {x}"),
-            Self::MissingArgs(x) => write!(f, "subcommand requires arguments: {x}"),
+            Self::BadMonitor(x) => write!(f, "monitor spec must be `name,wxh@r,x,y,scale`: {x}"),
+            Self::BadBind(x) => write!(f, "keybind requires non-empty mods, key, dispatcher, and arg: {x}"),
+            Self::DuplicateBind(x) => write!(f, "identical keybind already configured: {x}"),
+            Self::EmptyExec => write!(f, "exec-once command must not be empty"),
+            Self::EmptyGeneral => write!(f, "general key must not be empty"),
         }
     }
 }
 
-impl std::error::Error for ToolError {}
+impl std::error::Error for DesktopError {}
 
-/// A command-line tool with a small fixed subcommand set.
-#[derive(Debug)]
-pub struct Tool {
-    name: String,
+/// A Hyprland/Omarchy-style keybind: `mods, key, dispatcher, arg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keybind {
+    /// Modifier string, e.g. `SUPER`, `SUPER SHIFT`, `ALT`.
+    pub mods: String,
+    /// Key name, e.g. `Return`, `Q`, `space`.
+    pub key: String,
+    /// Dispatcher, e.g. `exec`, `killactive`, `workspace`.
+    pub dispatcher: String,
+    /// Dispatcher argument.
+    pub arg: String,
 }
 
-impl Tool {
-    /// Create the tool; fails fast on empty name.
-    pub fn new(name: impl Into<String>) -> Result<Self, ToolError> {
-        let name = name.into();
-        if name.trim().is_empty() { return Err(ToolError::EmptyName); }
-        Ok(Self { name })
+/// Desktop shell configuration (Hyprland/waybar/Omarchy inspired).
+#[derive(Debug, Default)]
+pub struct DesktopConfig {
+    general: BTreeMap<String, String>,
+    monitors: Vec<String>,
+    binds: Vec<Keybind>,
+    exec_once: Vec<String>,
+}
+
+impl DesktopConfig {
+    /// Empty configuration.
+    pub fn new() -> Self { Self::default() }
+
+    /// Set a `[general]`-style option (`key = value`).
+    pub fn general(&mut self, key: &str, value: impl Into<String>) -> Result<(), DesktopError> {
+        if key.trim().is_empty() { return Err(DesktopError::EmptyGeneral); }
+        self.general.insert(key.to_string(), value.into());
+        Ok(())
     }
 
-    /// Tool name.
-    pub fn name(&self) -> &str { &self.name }
+    /// Add a monitor line; must contain `,WxH@R` resolution and position.
+    pub fn monitor(&mut self, spec: impl Into<String>) -> Result<(), DesktopError> {
+        let spec = spec.into();
+        let ok = spec.split(',').count() >= 4
+            && spec.split(',').nth(1).map_or(false, |m| {
+                let m = m.trim();
+                (m.contains('x') && m.contains('@'))
+                    || matches!(m, "preferred" | "highres" | "highrr")
+            });
+        if !ok { return Err(DesktopError::BadMonitor(spec)); }
+        self.monitors.push(spec);
+        Ok(())
+    }
 
-    /// Dispatch a subcommand. Supported: `status`, `version`, `help`.
-    /// Commands needing args that get none fail fast.
-    pub fn run(&self, args: &[&str]) -> Result<String, ToolError> {
-        match args.first().copied().unwrap_or("help") {
-            "status" => Ok(format!("{}: ready", self.name)),
-            "version" => Ok(format!("{}: 0.1.0", self.name)),
-            "help" => Ok(format!("{}: commands: status, version, help", self.name)),
-            other => Err(ToolError::UnknownCommand(other.to_string())),
+    /// Add a keybind; all four fields must be non-empty, no exact duplicates.
+    pub fn bind(&mut self, b: Keybind) -> Result<(), DesktopError> {
+        if b.mods.trim().is_empty() || b.key.trim().is_empty()
+            || b.dispatcher.trim().is_empty() || b.arg.trim().is_empty()
+        {
+            return Err(DesktopError::BadBind(format!(
+                "{},{},{},{}", b.mods, b.key, b.dispatcher, b.arg)));
         }
+        if self.binds.contains(&b) {
+            return Err(DesktopError::DuplicateBind(format!("{}+{}", b.mods, b.key)));
+        }
+        self.binds.push(b);
+        Ok(())
+    }
+
+    /// Convenience keybind constructor.
+    pub fn keybind(&mut self, mods: &str, key: &str, dispatcher: &str, arg: &str)
+        -> Result<(), DesktopError>
+    {
+        self.bind(Keybind {
+            mods: mods.to_string(),
+            key: key.to_string(),
+            dispatcher: dispatcher.to_string(),
+            arg: arg.to_string(),
+        })
+    }
+
+    /// Add an `exec-once` startup command.
+    pub fn exec_once(&mut self, cmd: impl Into<String>) -> Result<(), DesktopError> {
+        let cmd = cmd.into();
+        if cmd.trim().is_empty() { return Err(DesktopError::EmptyExec); }
+        self.exec_once.push(cmd);
+        Ok(())
+    }
+
+    /// Render deterministic config text (Omarchy/Hyprland `key = value` style).
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (k, v) in &self.general {
+            out.push_str(&format!("{k} = {v}\n"));
+        }
+        for m in &self.monitors {
+            out.push_str(&format!("monitor={m}\n"));
+        }
+        for b in &self.binds {
+            out.push_str(&format!("bind={}, {}, {}, {}\n",
+                b.mods, b.key, b.dispatcher, b.arg));
+        }
+        for c in &self.exec_once {
+            out.push_str(&format!("exec-once = {c}\n"));
+        }
+        out
     }
 }
 
@@ -62,28 +143,54 @@ impl Tool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn status_and_version() {
-        let t = Tool::new("demo").unwrap();
-        assert_eq!(t.run(&["status"]).unwrap(), "demo: ready");
-        assert!(t.run(&["version"]).unwrap().contains("0.1.0"));
+    fn build() -> Result<DesktopConfig, DesktopError> {
+        let mut c = DesktopConfig::new();
+        c.general("layout", "dwindle")?;
+        c.monitor("DP-1,2560x1440@144,0x0,1")?;
+        c.monitor("HDMI-A-1,preferred,auto-right,auto,1")?;
+        c.keybind("SUPER", "Return", "exec", "kitty")?;
+        c.keybind("SUPER SHIFT", "E", "exec", "nautilus")?;
+        c.exec_once("waybar")?;
+        c.exec_once("swaybg -i /usr/share/backgrounds/omarchy.png")?;
+        Ok(c)
     }
 
     #[test]
-    fn no_args_shows_help() {
-        let t = Tool::new("demo").unwrap();
-        assert!(t.run(&[]).unwrap().contains("commands"));
+    fn renders_omarchy_style_config() {
+        let text = build().unwrap().render();
+        assert!(text.contains("layout = dwindle"));
+        assert!(text.contains("monitor=DP-1,2560x1440@144,0x0,1"));
+        assert!(text.contains("bind=SUPER, Return, exec, kitty"));
+        assert!(text.contains("exec-once = waybar"));
     }
 
     #[test]
-    fn unknown_command_fails() {
-        let t = Tool::new("demo").unwrap();
-        assert!(matches!(t.run(&["bogus"]), Err(ToolError::UnknownCommand(_))));
+    fn bad_monitor_fails() {
+        let mut c = DesktopConfig::new();
+        assert!(matches!(c.monitor("DP-1"), Err(DesktopError::BadMonitor(_))));
+        assert!(matches!(c.monitor("DP-1,1920x1080@60,0x0,1"), Ok(())));
     }
 
     #[test]
-    fn empty_name_fails() {
-        assert!(Tool::new(" ").is_err());
+    fn empty_bind_field_fails() {
+        let mut c = DesktopConfig::new();
+        assert!(matches!(c.keybind("SUPER", "", "exec", "x"), Err(DesktopError::BadBind(_))));
+    }
+
+    #[test]
+    fn duplicate_bind_fails() {
+        let mut c = DesktopConfig::new();
+        c.keybind("SUPER", "Q", "killactive", "").unwrap_err();
+        c.keybind("SUPER", "Q", "killactive", "force").unwrap();
+        assert!(matches!(
+            c.keybind("SUPER", "Q", "killactive", "force"),
+            Err(DesktopError::DuplicateBind(_))));
+    }
+
+    #[test]
+    fn empty_exec_fails() {
+        let mut c = DesktopConfig::new();
+        assert!(matches!(c.exec_once("  "), Err(DesktopError::EmptyExec)));
     }
 
 }
@@ -98,219 +205,5 @@ impl Component {
     /// Create the component handle.
     pub fn new() -> Self {
         Self { name: "SigmaOS Component" }
-    }
-}
-
-// ─── Panels domain model ──────────────────────────────────────────────
-
-/// Panel position
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelPos { Top, Bottom, Left, Right }
-
-/// Panel kind
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PanelKind {
-    Taskbar, Dock, StatusBar, Launcher,
-    ControlCenter, NotificationCenter, Custom(String),
-}
-
-/// Panel visibility
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PanelVisibility { Always, AutoHide, Never }
-
-/// Panel
-#[derive(Debug, Clone)]
-pub struct Panel {
-    pub name: String,
-    pub kind: PanelKind,
-    pub position: PanelPos,
-    pub visibility: PanelVisibility,
-    pub size: u32,
-    pub monitor: String,
-    pub enabled: bool,
-}
-
-impl Panel {
-    /// Create new panel
-    pub fn new(name: &str, kind: PanelKind, position: PanelPos, monitor: &str) -> Self {
-        Self {
-            name: name.into(),
-            kind,
-            position,
-            visibility: PanelVisibility::Always,
-            size: 30,
-            monitor: monitor.into(),
-            enabled: true,
-        }
-    }
-
-    /// Set visibility
-    pub fn set_visibility(&mut self, vis: PanelVisibility) {
-        self.visibility = vis;
-    }
-
-    /// Set size
-    pub fn set_size(&mut self, size: u32) { self.size = size; }
-
-    /// Toggle enabled
-    pub fn toggle(&mut self) { self.enabled = !self.enabled; }
-
-    /// Check if visible on screen
-    pub fn is_visible(&self) -> bool {
-        self.enabled && self.visibility != PanelVisibility::Never
-    }
-}
-
-/// Panel manager
-#[derive(Debug, Default)]
-pub struct PanelsManager {
-    panels: Vec<Panel>,
-}
-
-impl PanelsManager {
-    pub fn new() -> Self { Self::default() }
-
-    /// Add panel
-    pub fn add_panel(&mut self, panel: Panel) -> bool {
-        if self.panels.iter().any(|p| p.name == panel.name) { return false; }
-        self.panels.push(panel);
-        true
-    }
-
-    /// Remove panel
-    pub fn remove_panel(&mut self, name: &str) -> bool {
-        let before = self.panels.len();
-        self.panels.retain(|p| p.name != name);
-        self.panels.len() < before
-    }
-
-    /// Get panel
-    pub fn get_panel(&self, name: &str) -> Option<&Panel> {
-        self.panels.iter().find(|p| p.name == name)
-    }
-
-    /// Get panel mutably
-    pub fn get_panel_mut(&mut self, name: &str) -> Option<&mut Panel> {
-        self.panels.iter_mut().find(|p| p.name == name)
-    }
-
-    /// List panels
-    pub fn list(&self) -> &[Panel] { &self.panels }
-
-    /// Panels on position
-    pub fn on_position(&self, pos: PanelPos) -> Vec<&Panel> {
-        self.panels.iter().filter(|p| p.position == pos).collect()
-    }
-
-    /// Panels on monitor
-    pub fn on_monitor(&self, monitor: &str) -> Vec<&Panel> {
-        self.panels.iter().filter(|p| p.monitor == monitor).collect()
-    }
-
-    /// Visible panels
-    pub fn visible(&self) -> Vec<&Panel> {
-        self.panels.iter().filter(|p| p.is_visible()).collect()
-    }
-
-    /// Panels by kind
-    pub fn by_kind(&self, kind: &PanelKind) -> Vec<&Panel> {
-        self.panels.iter().filter(|p| &p.kind == kind).collect()
-    }
-
-    /// Panel count
-    pub fn count(&self) -> usize { self.panels.len() }
-}
-
-/// Default panel layout for SigmaOS
-pub fn default_layout(monitor: &str) -> Vec<Panel> {
-    vec![
-        Panel::new("top-bar", PanelKind::StatusBar, PanelPos::Top, monitor),
-        Panel::new("bottom-dock", PanelKind::Dock, PanelPos::Bottom, monitor),
-        Panel::new("launcher", PanelKind::Launcher, PanelPos::Left, monitor),
-    ]
-}
-
-#[cfg(test)]
-mod panels_tests {
-    use super::*;
-
-    #[test]
-    fn test_panel_pos() {
-        let positions = vec![PanelPos::Top, PanelPos::Bottom, PanelPos::Left, PanelPos::Right];
-        assert_eq!(positions.len(), 4);
-    }
-
-    #[test]
-    fn test_panel_kind() {
-        let kinds = vec![
-            PanelKind::Taskbar, PanelKind::Dock, PanelKind::StatusBar,
-            PanelKind::Launcher, PanelKind::ControlCenter,
-            PanelKind::NotificationCenter,
-        ];
-        assert_eq!(kinds.len(), 6);
-    }
-
-    #[test]
-    fn test_panel_creation() {
-        let panel = Panel::new("bar", PanelKind::StatusBar, PanelPos::Top, "DP-1");
-        assert_eq!(panel.name, "bar");
-        assert_eq!(panel.size, 30);
-        assert!(panel.enabled);
-        assert!(panel.is_visible());
-    }
-
-    #[test]
-    fn test_panel_visibility() {
-        let mut panel = Panel::new("p", PanelKind::Dock, PanelPos::Bottom, "eDP-1");
-        assert!(panel.is_visible());
-        panel.set_visibility(PanelVisibility::Never);
-        assert!(!panel.is_visible());
-        panel.set_visibility(PanelVisibility::AutoHide);
-        assert!(panel.is_visible()); // autohide still "visible" logically
-        panel.toggle();
-        assert!(!panel.enabled);
-    }
-
-    #[test]
-    fn test_manager_add_remove() {
-        let mut mgr = PanelsManager::new();
-        assert!(mgr.add_panel(Panel::new("a", PanelKind::Dock, PanelPos::Bottom, "DP-1")));
-        assert!(!mgr.add_panel(Panel::new("a", PanelKind::Dock, PanelPos::Top, "DP-1"))); // dup
-        assert!(mgr.remove_panel("a"));
-        assert_eq!(mgr.count(), 0);
-    }
-
-    #[test]
-    fn test_manager_filters() {
-        let mut mgr = PanelsManager::new();
-        mgr.add_panel(Panel::new("top1", PanelKind::StatusBar, PanelPos::Top, "DP-1"));
-        mgr.add_panel(Panel::new("top2", PanelKind::StatusBar, PanelPos::Top, "DP-2"));
-        mgr.add_panel(Panel::new("bot1", PanelKind::Dock, PanelPos::Bottom, "DP-1"));
-        
-        assert_eq!(mgr.on_position(PanelPos::Top).len(), 2);
-        assert_eq!(mgr.on_monitor("DP-1").len(), 2);
-        assert_eq!(mgr.by_kind(&PanelKind::StatusBar).len(), 2);
-        assert_eq!(mgr.visible().len(), 3);
-    }
-
-    #[test]
-    fn test_default_layout() {
-        let panels = default_layout("eDP-1");
-        assert_eq!(panels.len(), 3);
-        assert!(panels.iter().any(|p| p.kind == PanelKind::StatusBar));
-        assert!(panels.iter().any(|p| p.kind == PanelKind::Dock));
-        assert!(panels.iter().any(|p| p.kind == PanelKind::Launcher));
-    }
-
-    #[test]
-    fn test_hidden_panel_excluded() {
-        let mut mgr = PanelsManager::new();
-        let mut p = Panel::new("hidden", PanelKind::Dock, PanelPos::Bottom, "DP-1");
-        p.toggle(); // disable
-        mgr.add_panel(p);
-        mgr.add_panel(Panel::new("shown", PanelKind::Dock, PanelPos::Bottom, "DP-1"));
-        
-        assert_eq!(mgr.visible().len(), 1);
-        assert_eq!(mgr.count(), 2);
     }
 }
