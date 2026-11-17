@@ -3,7 +3,7 @@ name = "SigmaOS-panels"
 tier = 2
 stability = "scaffold"
 language = "rust"
-description = "panels component"
+description = "No GitHub description is set; component scope remains unclassified."
 upstream = []
 
 [contract]
